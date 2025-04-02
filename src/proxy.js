@@ -1,16 +1,32 @@
 const http = require('http');
+const net = require('net');
+const tls = require('tls');
 const { storeRequest } = require('./storage');
 const api = require('./api');
+const { generateCA, generateHostCert } = require('./cert-utils');
+const fs = require('fs');
+const path = require('path');
 
 const proxyPort = 8080;
 const apiPort = 8000;
 
+// Ensure certs directory exists
+if (!fs.existsSync(path.join(__dirname, '../certs'))) {
+    fs.mkdirSync(path.join(__dirname, '../certs'));
+}
+
+// Generate CA certificate
+generateCA();
+
+// Start API server
 api.listen(apiPort, () => {
     console.log(`API server running on port ${apiPort}`);
 });
 
+// Create HTTP proxy server
 const proxyServer = http.createServer(async (clientReq, clientRes) => {
     try {
+        console.log('зашел')
         const { host, port, path, headers } = parseProxyRequest(clientReq);
 
         const proxyReq = http.request({
@@ -70,9 +86,73 @@ const proxyServer = http.createServer(async (clientReq, clientRes) => {
     }
 });
 
-function parseProxyRequest(req) {
-    const requestLine = req.method + ' ' + req.url + ' ' + req.httpVersion;
+// Handle CONNECT method for HTTPS
+proxyServer.on('connect', (req, clientSocket, head) => {
+    try {
+        // Parse host and port from CONNECT request
+        const [host, port] = req.url.split(':');
+        const targetPort = port || 443;
 
+        // Establish connection to target server
+        const serverSocket = net.connect(targetPort, host, () => {
+            // Respond to client that connection is established
+            clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+            // Generate certificate for this host
+            const { cert, key } = generateHostCert(host);
+
+            // Create TLS server for MITM
+            const tlsServer = tls.createServer({
+                key: key,
+                cert: cert,
+                SNICallback: (servername, cb) => {
+                    const { cert, key } = generateHostCert(servername);
+                    const ctx = tls.createSecureContext({ cert, key });
+                    cb(null, ctx);
+                }
+            });
+
+            // Pipe client through our TLS server to target
+            tlsServer.on('secureConnection', (tlsSocket) => {
+                tlsSocket.pipe(serverSocket);
+                serverSocket.pipe(tlsSocket);
+
+                // Store the request
+                storeRequest({
+                    method: 'CONNECT',
+                    url: req.url,
+                    host,
+                    port: targetPort,
+                    headers: req.headers,
+                    timestamp: new Date()
+                }, {
+                    statusCode: 200,
+                    statusMessage: 'Connection Established',
+                    headers: {},
+                    body: ''
+                });
+            });
+
+            // Start TLS server
+            tlsServer.emit('connection', clientSocket);
+        });
+
+        serverSocket.on('error', (err) => {
+            console.error('Server socket error:', err);
+            clientSocket.end();
+        });
+
+        if (head && head.length) {
+            serverSocket.write(head);
+        }
+
+    } catch (err) {
+        console.error('HTTPS proxy error:', err);
+        clientSocket.end();
+    }
+});
+
+function parseProxyRequest(req) {
     const urlMatch = req.url.match(/^https?:\/\/([^\/]+)(\/.*)?$/i);
     if (!urlMatch) {
         throw new Error('Invalid proxy request format');
@@ -91,9 +171,7 @@ function parseProxyRequest(req) {
     }
 
     const headers = { ...req.headers };
-
     delete headers['proxy-connection'];
-
     headers['host'] = fullHost;
 
     return {

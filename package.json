@@ -1,16 +1,17 @@
 {
   "name": "proxy",
   "version": "1.0.0",
-  "description": "HTTP Proxy",
+  "description": "HTTP/HTTPS Proxy",
   "main": "src/proxy.js",
   "scripts": {
-    "start": "node src/proxy.js"
+    "start": "node src/proxy.js",
+    "gen-ca": "node scripts/gen-ca.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "http-proxy": "^1.18.1",
     "axios": "^1.6.2",
     "body-parser": "^1.20.2",
-    "morgan": "^1.10.0"
+    "morgan": "^1.10.0",
+    "node-forge": "^1.3.1"
   }
 }
