@@ -13,32 +13,42 @@ const proxyServer = http.createServer(async (clientReq, clientRes) => {
     try {
         const { host, port, path, headers } = parseProxyRequest(clientReq);
 
-        const proxyReq = http.request({
+        const proxy = port === 443 ? require('https') : http;
+
+        const proxyReq = proxy.request({
             host,
             port,
             path,
             method: clientReq.method,
             headers
-        }, (proxyRes) => {
+        }, async (proxyRes) => {
             let responseBody = [];
 
             proxyRes.on('data', (chunk) => {
                 responseBody.push(chunk);
             });
 
-            proxyRes.on('end', () => {
+            proxyRes.on('end', async () => {
                 const fullResponse = Buffer.concat(responseBody).toString();
 
-                storeRequest({
-                    ...clientReq,
-                    host,
-                    port,
-                    path,
-                    headers
-                }, {
-                    ...proxyRes,
-                    body: fullResponse
-                });
+                try {
+                    await storeRequest({
+                        ...clientReq,
+                        host,
+                        port,
+                        path,
+                        headers,
+                        body: clientReq.body || ''
+                    }, {
+                        ...proxyRes,
+                        statusCode: proxyRes.statusCode,
+                        statusMessage: proxyRes.statusMessage,
+                        headers: proxyRes.headers,
+                        body: fullResponse
+                    });
+                } catch (err) {
+                    console.error('Error storing request:', err);
+                }
 
                 clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
                 clientRes.end(fullResponse);
@@ -56,7 +66,9 @@ const proxyServer = http.createServer(async (clientReq, clientRes) => {
             clientReq.on('data', (chunk) => {
                 body.push(chunk);
             }).on('end', () => {
-                proxyReq.write(Buffer.concat(body));
+                const bodyBuffer = Buffer.concat(body);
+                clientReq.body = bodyBuffer; // Сохраняем тело запроса
+                proxyReq.write(bodyBuffer);
                 proxyReq.end();
             });
         } else {
@@ -71,8 +83,6 @@ const proxyServer = http.createServer(async (clientReq, clientRes) => {
 });
 
 function parseProxyRequest(req) {
-    const requestLine = req.method + ' ' + req.url + ' ' + req.httpVersion;
-
     const urlMatch = req.url.match(/^https?:\/\/([^\/]+)(\/.*)?$/i);
     if (!urlMatch) {
         throw new Error('Invalid proxy request format');
@@ -91,9 +101,7 @@ function parseProxyRequest(req) {
     }
 
     const headers = { ...req.headers };
-
     delete headers['proxy-connection'];
-
     headers['host'] = fullHost;
 
     return {

@@ -2,62 +2,81 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const { getRequest, getAllRequests } = require('./storage');
 const http = require('http');
+const https = require('https');
 
 const app = express();
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-app.get('/requests', (req, res) => {
-    const requests = getAllRequests();
-    res.json(requests);
-});
-
-app.get('/requests/:id', (req, res) => {
-    const request = getRequest(req.params.id);
-    if (request) {
-        res.json(request);
-    } else {
-        res.status(404).json({ error: 'Request not found' });
+app.get('/requests', async (req, res) => {
+    try {
+        const requests = await getAllRequests();
+        res.json(requests);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
-app.get('/repeat/:id', (req, res) => {
-    const originalRequest = getRequest(req.params.id);
-    if (!originalRequest) {
-        return res.status(404).json({ error: 'Request not found' });
+app.get('/requests/:id', async (req, res) => {
+    try {
+        const request = await getRequest(req.params.id);
+        if (request) {
+            res.json(request);
+        } else {
+            res.status(404).json({ error: 'Request not found' });
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
+});
 
-    const options = {
-        host: originalRequest.host,
-        port: originalRequest.port,
-        path: originalRequest.path,
-        method: originalRequest.method,
-        headers: originalRequest.headers
-    };
+app.get('/repeat/:id', async (req, res) => {
+    try {
+        const originalRequest = await getRequest(req.params.id);
+        if (!originalRequest) {
+            return res.status(404).json({ error: 'Request not found' });
+        }
 
-    const proxyReq = http.request(options, (proxyRes) => {
-        let responseBody = [];
+        const protocol = originalRequest.port === 443 ? https : http;
+        const options = {
+            hostname: originalRequest.host,
+            port: originalRequest.port,
+            path: originalRequest.path,
+            method: originalRequest.method,
+            headers: originalRequest.headers
+        };
 
-        proxyRes.on('data', (chunk) => {
-            responseBody.push(chunk);
-        });
+        const proxyReq = protocol.request(options, (proxyRes) => {
+            let responseBody = [];
 
-        proxyRes.on('end', () => {
-            const fullResponse = Buffer.concat(responseBody).toString();
-            res.json({
-                status: proxyRes.statusCode,
-                headers: proxyRes.headers,
-                body: fullResponse
+            proxyRes.on('data', (chunk) => {
+                responseBody.push(chunk);
+            });
+
+            proxyRes.on('end', () => {
+                const fullResponse = Buffer.concat(responseBody).toString();
+                res.json({
+                    status: proxyRes.statusCode,
+                    headers: proxyRes.headers,
+                    body: fullResponse
+                });
             });
         });
-    });
 
-    proxyReq.on('error', (err) => {
+        proxyReq.on('error', (err) => {
+            res.status(500).json({ error: err.message });
+        });
+
+        // Если есть тело запроса (для POST, PUT, PATCH)
+        if (['POST', 'PUT', 'PATCH'].includes(originalRequest.method)) {
+            proxyReq.write(originalRequest.body);
+        }
+
+        proxyReq.end();
+    } catch (err) {
         res.status(500).json({ error: err.message });
-    });
-
-    proxyReq.end();
+    }
 });
 
 module.exports = app;
